@@ -1,0 +1,306 @@
+version: "3.7"
+
+networks:
+  kong-fc:
+    external: false
+
+volumes:
+  postgres_data:
+    driver: local
+
+services:
+
+  ###
+  ### Banco de dados
+  ### Nesse momento estamos usando o modelo de deployment com banco de dados, o que indica
+  ### que as configuracoes a.k.a rotas,servicos e plugins ficam persistidas nele
+  ###
+  kong-database:
+    image: postgres:9.5
+    deploy:
+      restart_policy:
+        condition: any
+    networks:
+      - kong-fc
+    environment:
+      - POSTGRES_USER=kong
+      - POSTGRES_DB=kong
+      - POSTGRES_PASSWORD=kong
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "kong"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ###
+  ### Inicio do banco de dados
+  ### Esse container ira realizar as criacoes iniciais das tabelas necessarias para
+  ### armazenamento das configuracoes do Kong
+  ###
+  kong-migration-bootstrap:
+    image: claudioed/kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+    networks:
+      - kong-fc
+    depends_on:
+      - kong-database
+    environment:
+      - KONG_DATABASE=postgres
+      - KONG_PG_HOST=kong-database
+      - KONG_PG_USER=kong
+      - KONG_PG_PASSWORD=kong
+    command: kong migrations bootstrap
+
+  ###
+  ### Inicio do banco de dados
+  ### Esse container ira realizar as configuracoes iniciais das tabelas necessarias para
+  ### armazenamento das configuracoes do Kong
+  ###
+  kong-migration-up:
+    image: claudioed/kong-fc
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+    depends_on:
+      - kong-database
+    environment:
+      - KONG_DATABASE=postgres
+      - KONG_PG_HOST=kong-database
+      - KONG_PG_USER=kong
+      - KONG_PG_PASSWORD=kong
+    command: kong migrations up
+
+  ###
+  ### Kong API Gateway
+  ### Container com o runtime do Kong API Gateway
+  ###
+  kong:
+    container_name: kong
+    image: claudioed/kong-fc
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: any
+    depends_on:
+      - kong-database
+    environment:
+      - KONG_DATABASE=postgres
+      - KONG_PG_HOST=kong-database
+      - KONG_PG_DATABASE=kong
+      - KONG_PG_PASSWORD=kong
+      - KONG_PROXY_ACCESS_LOG=/dev/stdout
+      - KONG_ADMIN_ACCESS_LOG=/dev/stdout
+      - KONG_PROXY_ERROR_LOG=/dev/stderr
+      - KONG_ADMIN_ERROR_LOG=/dev/stderr
+      - KONG_ADMIN_LISTEN=0.0.0.0:8001, 0.0.0.0:8444 ssl
+      - KONG_PROXY_LISTEN=0.0.0.0:8000, 0.0.0.0:8443 ssl http2
+      - KONG_ADMIN_LISTEN=0.0.0.0:8001
+      - KONG_REAL_IP_RECURSIVE=on
+      - KONG_NGINX_HTTP_RESOLVER=8.8.8.8
+      - KONG_PLUGINS=bundled,oidc,kong-jwt2header,kong-upstream-jwt
+    ports:
+      - "80:8000"
+      - "443:8443"
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "wget", "-O-", "http://kong:8001/status"]
+      interval: 5s
+      retries: 10
+    restart: on-failure
+
+  ###
+  ### Players
+  ### Microservico com implementacao ficticia simulando usuarios
+  ###
+  players:
+    image: claudioed/players
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  ###
+  ### Championships
+  ### Microservico com implementacao ficticia simulando torneios
+  ###
+  championships:
+    image: claudioed/championships
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  ###
+  ### Jogos
+  ### Microservico com implementacao ficticia simulando jogos
+  ###
+  matches:
+    image: claudioed/matches
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  ###
+  ### Apostas
+  ### Microservico com implementacao ficticia simulando apostas
+  ###
+  bets:
+    image: claudioed/bets
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+    ports:
+      - "9999:9999"
+    environment:
+      - MATCH_SVC=http://matches:9999/api/matches/6c51d4dd-e277-4282-9c51-871ba7fb16b3
+      - CHAMPIONSHIP_SVC=http://championships:9999/api/championships/144954fe-b6c3-4a51-80d3-92911a06265c
+      - PLAYER_SVC=http://players:9999/api/players/144954fe-b6c3-4a51-80d3-92911a06265c
+
+  postgres:
+    image: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: password
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:legacy
+    environment:
+      DB_VENDOR: POSTGRES
+      DB_ADDR: postgres
+      DB_DATABASE: keycloak
+      DB_USER: keycloak
+      DB_SCHEMA: public
+      DB_PASSWORD: password
+      KEYCLOAK_USER: admin
+      KEYCLOAK_PASSWORD: Pa55w0rd
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
+  ###
+  ### Konga
+  ### Administracao via interface grafica do Kong API Gateway
+  ###
+  konga:
+    image: pantsel/konga
+    networks:
+      - kong-fc
+    deploy:
+      restart_policy:
+        condition: on-failure
+    depends_on:
+      - kong-database
+    environment:
+      NODE_ENV: development
+    ports:
+      - "1337:1337"
+
+  #######################################
+  # Prometheus
+  #######################################
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    networks:
+      - kong-fc
+    ports:
+      - "9090:9090"
+    volumes:
+    - ./prom-conf/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+  #######################################
+  # Grafana
+  #######################################
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    networks:
+      - kong-fc
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+
+  node_exporter:
+    image: prom/node-exporter:latest
+    networks:
+      - kong-fc
+    ports:
+      - "9100:9100"
+    container_name: node_exporter
+    restart: always
+    depends_on:
+      - prometheus
+
+  fluent-bit:
+    image: fluent/fluent-bit:1.9.3
+    volumes:
+      - ./fluent-bit/conf:/fluent-bit/etc
+    ports:
+      - "24224:24224"
+      - "5140:5140/udp"
+      - "2020:2020"
+      - "5170:5170"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: 100m
+        max-file: "5"
+    networks:
+      - kong-fc
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.13.1
+    container_name: elasticsearch
+    networks:
+      - kong-fc
+    environment:
+      - "discovery.type=single-node"
+    ports:
+      - "9200:9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.13.1
+    environment:
+      - "ELASTICSEARCH_HOSTS=http://elasticsearch:9200"
+    networks:
+      - kong-fc
+    ports:
+      - "5601:5601"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.33
+    container_name: jaeger
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14250:14250"
+      - "14268:14268"
+      - "14269:14269"
+      - "9411:9411"
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=9411
+    networks:
+      - kong-fc
