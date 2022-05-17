@@ -102,7 +102,7 @@ services:
       - KONG_ADMIN_LISTEN=0.0.0.0:8001
       - KONG_REAL_IP_RECURSIVE=on
       - KONG_NGINX_HTTP_RESOLVER=8.8.8.8
-      - KONG_PLUGINS=bundled,oidc,kong-jwt2header,kong-upstream-jwt
+      - KONG_PLUGINS=bundled
     ports:
       - "80:8000"
       - "443:8443"
