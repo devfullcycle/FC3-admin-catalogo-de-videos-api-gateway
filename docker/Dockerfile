@@ -6,3 +6,6 @@ RUN luarocks install kong-oidc && \
     luarocks install kong-upstream-jwt
 
 USER kong
+
+
+
